@@ -23,6 +23,16 @@ static uint8_t leaseMgr[16];
 struct gengetopt_args_info args_info;
 char *amUsername, *amPassword;
 
+// Thread güvenliği için mutex'ler
+static pthread_mutex_t lease_manager_mutex;
+static pthread_mutex_t foothill_mutex;
+
+// Thread için argüman yapısı
+struct thread_data {
+    int connfd;
+    // Gerekirse buraya başka veriler eklenebilir
+};
+
 int file_exists(char *filename) {
   struct stat buffer;   
   return (stat (filename, &buffer) == 0);
@@ -311,7 +321,11 @@ static void *preshareCtx = NULL;
 inline static void *getKdContext(const char *const adam,
                                  const char *const uri) {
     uint8_t isPreshare = (strcmp("0", adam) == 0);
+
+    pthread_mutex_lock(&foothill_mutex);
+
     if (isPreshare && preshareCtx != NULL) {
+        pthread_mutex_unlock(&foothill_mutex);
         return preshareCtx;
     }
     fprintf(stderr, "[.] adamId: %s, uri: %s\n", adam, uri);
@@ -331,78 +345,136 @@ inline static void *getKdContext(const char *const adam,
         &persistK, FHinstance, &defaultId, &defaultId, &keyUri, &keyFormat,
         &keyFormatVer, &serverUri, &protocolType, &fpsCert);
 
-    if (persistK.obj == NULL)
+    if (persistK.obj == NULL) {
+        pthread_mutex_unlock(&foothill_mutex);
         return NULL;
+    }
 
     struct shared_ptr SVFootHillPContext;
     _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERKN11SVDecryptor15SVDecryptorTypeERKb(
         &SVFootHillPContext, FHinstance, persistK.obj);
 
-    if (SVFootHillPContext.obj == NULL)
+    if (SVFootHillPContext.obj == NULL) {
+        pthread_mutex_unlock(&foothill_mutex);
         return NULL;
+    }
 
     void *kdContext =
         *_ZNK18SVFootHillPContext9kdContextEv(SVFootHillPContext.obj);
     if (kdContext != NULL && isPreshare)
         preshareCtx = kdContext;
+    
+    pthread_mutex_unlock(&foothill_mutex);
     return kdContext;
 }
 
 void handle(const int connfd) {
+    // Yeniden kullanılabilir tampon ve boyutu
+    void *buffer = NULL;
+    size_t buffer_capacity = 0;
+    const size_t initial_buffer_size = 1024 * 1024; // Örnek: 1MB başlangıç boyutu
+
     while (1) {
         uint8_t adamSize;
         if (!readfull(connfd, &adamSize, sizeof(uint8_t)))
-            return;
+            goto cleanup_handle;
         if (adamSize <= 0)
-            return;
+            goto cleanup_handle;
 
         char adam[adamSize + 1];
         if (!readfull(connfd, adam, adamSize))
-            return;
+            goto cleanup_handle;
         adam[adamSize] = '\0';
 
         uint8_t uri_size;
         if (!readfull(connfd, &uri_size, sizeof(uint8_t)))
-            return;
+            goto cleanup_handle;
 
         char uri[uri_size + 1];
         if (!readfull(connfd, uri, uri_size))
-            return;
+            goto cleanup_handle;
         uri[uri_size] = '\0';
 
         void **const kdContext = getKdContext(adam, uri);
         if (kdContext == NULL)
-            return;
+            goto cleanup_handle;
 
         while (1) {
             uint32_t size;
             if (!readfull(connfd, &size, sizeof(uint32_t))) {
-                perror("read");
-                return;
+                perror("read size");
+                goto cleanup_handle;
             }
 
             if (size <= 0)
                 break;
 
-            void *sample = malloc(size);
-            if (sample == NULL) {
-                perror("malloc");
-                return;
+            // Tamponun yeterli olup olmadığını kontrol et, gerekirse büyüt
+            if (buffer_capacity < size) {
+                void *new_buffer = realloc(buffer, size);
+                if (new_buffer == NULL) {
+                    perror("realloc");
+                    // buffer hala eski veriyi tutuyor olabilir, onu serbest bırakalım
+                    goto cleanup_handle; 
+                }
+                buffer = new_buffer;
+                buffer_capacity = size;
             }
-            if (!readfull(connfd, sample, size)) {
-                free(sample);
-                perror("read");
-                return;
+            
+            if (buffer == NULL && size > 0) { // İlk tahsis veya realloc başarısız olduysa
+                 buffer = malloc(size > initial_buffer_size ? size : initial_buffer_size);
+                 if (buffer == NULL) {
+                    perror("malloc buffer");
+                    goto cleanup_handle;
+                 }
+                 buffer_capacity = size > initial_buffer_size ? size : initial_buffer_size;
             }
 
-            NfcRKVnxuKZy04KWbdFu71Ou(*kdContext, 5, sample, sample, size);
-            writefull(connfd, sample, size);
-            free(sample);
+
+            if (!readfull(connfd, buffer, size)) {
+                perror("read sample");
+                goto cleanup_handle;
+            }
+
+            NfcRKVnxuKZy04KWbdFu71Ou(*kdContext, 5, buffer, buffer, size);
+            writefull(connfd, buffer, size);
         }
     }
+
+cleanup_handle:
+    if (buffer != NULL) {
+        free(buffer);
+    }
+    // connfd bu fonksiyon dışında, çağıran thread_handler içinde kapatılacak
 }
 
 extern uint8_t handle_cpp(int);
+
+// Her bağlantı için thread fonksiyonu
+void *connection_handler(void *socket_desc) {
+    struct thread_data *data = (struct thread_data *)socket_desc;
+    int connfd = data->connfd;
+
+    if (!handle_cpp(connfd)) { // Bu handle_cpp çağrısı handle(connfd)'yi çağırır
+        uint8_t autom = 1;
+        // leaseMgr global olduğu için doğrudan erişilebilir, ancak thread güvenliği sorunları olabilir.
+        // Bu özel durumda, leaseMgr'nin nasıl kullanıldığına bağlı.
+        // Eğer leaseMgr'ye yazma işlemleri varsa, mutex gerekebilir.
+        // Şimdilik, sadece bir okuma veya basit bir durum değişikliği olduğunu varsayıyoruz.
+        pthread_mutex_lock(&lease_manager_mutex);
+        _ZN22SVPlaybackLeaseManager12requestLeaseERKb(leaseMgr, &autom);
+        pthread_mutex_unlock(&lease_manager_mutex);
+    }
+
+    if (close(connfd) == -1) {
+        perror("close connfd in thread");
+    }
+    
+    free(socket_desc); // Thread argümanları için ayrılan belleği serbest bırak
+    pthread_detach(pthread_self()); // Thread'in kaynaklarını otomatik olarak serbest bırak
+    return NULL;
+}
+
 
 inline static int new_socket() {
     const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
@@ -418,16 +490,17 @@ inline static int new_socket() {
     serv_addr.sin_port = htons(args_info.decrypt_port_arg);
     if (bind(fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1) {
         perror("bind");
+        close(fd); // fd'yi kapatmayı unutma
         return EXIT_FAILURE;
     }
 
-    if (listen(fd, 5) == -1) {
+    if (listen(fd, SOMAXCONN) == -1) { // SOMAXCONN genellikle daha iyi bir kuyruk boyutu sağlar
         perror("listen");
+        close(fd); // fd'yi kapatmayı unutma
         return EXIT_FAILURE;
     }
 
     fprintf(stderr, "[!] listening %s:%d\n", args_info.host_arg, args_info.decrypt_port_arg);
-    // close(STDOUT_FILENO);
 
     static struct sockaddr_in peer_addr;
     static socklen_t peer_addr_size = sizeof(peer_addr);
@@ -435,41 +508,56 @@ inline static int new_socket() {
         const int connfd = accept4(fd, (struct sockaddr *)&peer_addr,
                                    &peer_addr_size, SOCK_CLOEXEC);
         if (connfd == -1) {
+            if (errno == EINTR) continue; // Kesinti durumunda devam et
             if (errno == ENETDOWN || errno == EPROTO || errno == ENOPROTOOPT ||
                 errno == EHOSTDOWN || errno == ENONET ||
                 errno == EHOSTUNREACH || errno == EOPNOTSUPP ||
-                errno == ENETUNREACH)
+                errno == ENETUNREACH) {
+                perror("accept4 recoverable");
                 continue;
-            perror("accept4");
-            return EXIT_FAILURE;
+            }
+            perror("accept4 critical");
+            // Kritik hata durumunda fd'yi kapatıp çıkabiliriz veya loglayıp devam edebiliriz.
+            // Şimdilik devam ediyoruz, ancak uzun vadede daha iyi hata yönetimi gerekebilir.
+            continue; 
         }
+        
+        pthread_t sniffer_thread;
+        struct thread_data *data = malloc(sizeof(struct thread_data));
+        if (data == NULL) {
+            perror("malloc thread_data");
+            close(connfd);
+            continue;
+        }
+        data->connfd = connfd;
 
-        if (!handle_cpp(connfd)) {
-            uint8_t autom = 1;
-            _ZN22SVPlaybackLeaseManager12requestLeaseERKb(leaseMgr, &autom);
+        if (pthread_create(&sniffer_thread, NULL, connection_handler, (void *)data) < 0) {
+            perror("could not create thread");
+            free(data);
+            close(connfd);
+            // Thread oluşturma başarısız olursa, döngüye devam et.
+            // Uygulamanın tamamen durması yerine sadece bu bağlantıyı reddetmek daha iyi olabilir.
+            continue;
         }
-        // if (sigsetjmp(catcher.env, 0) == 0) {
-        //     catcher.do_jump = 1;
-        //     handle(connfd);
-        // }
-        // catcher.do_jump = 0;
-
-        if (close(connfd) == -1) {
-            perror("close");
-            return EXIT_FAILURE;
-        }
+        // Ana thread, yeni bağlantıları kabul etmeye devam eder.
+        // Thread'ler pthread_detach ile kendi kaynaklarını serbest bırakacak.
     }
+    // Bu kısma normalde ulaşılamaz, ancak temizlik için
+    close(fd);
+    return 0; // Veya uygun bir çıkış kodu
 }
 
 
-const char* get_m3u8_method_play(uint8_t leaseMgr[16], unsigned long adam) {
+const char* get_m3u8_method_play(uint8_t current_leaseMgr[16], unsigned long adam) {
     union std_string HLS = new_std_string_short_mode("HLS");
     struct std_vector HLSParam = new_std_vector(&HLS);
     static uint8_t z0 = 0;
     struct shared_ptr ptr_result;
+    pthread_mutex_lock(&lease_manager_mutex);
     _ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
-        &ptr_result, leaseMgr, &adam, &HLSParam, &z0
+        &ptr_result, current_leaseMgr, &adam, &HLSParam, &z0
     );
+    pthread_mutex_unlock(&lease_manager_mutex);
     
     if (ptr_result.obj == NULL) {
         return NULL;
@@ -541,10 +629,11 @@ void handle_m3u8(const int connfd) {
     }
 }
 
-static inline void *new_socket_m3u8(void *args) {
+static inline void *new_socket_m3u8(void *args_unused) {
     const int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (fd == -1) {
-        perror("socket");
+        perror("socket m3u8");
+        pthread_exit(NULL); // Thread'den çıkış
     }
     const int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
@@ -554,14 +643,15 @@ static inline void *new_socket_m3u8(void *args) {
     serv_addr.sin_port = htons(args_info.m3u8_port_arg);
     if (bind(fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1) {
         perror("bind");
+        pthread_exit(NULL);
     }
 
     if (listen(fd, 5) == -1) {
         perror("listen");
+        pthread_exit(NULL);
     }
 
     fprintf(stderr, "[!] listening m3u8 request on %s:%d\n", args_info.host_arg, args_info.m3u8_port_arg);
-    // close(STDOUT_FILENO);
 
     static struct sockaddr_in peer_addr;
     static socklen_t peer_addr_size = sizeof(peer_addr);
@@ -584,16 +674,35 @@ static inline void *new_socket_m3u8(void *args) {
             perror("close");
         }
     }
+    pthread_exit(NULL);
 }
 
 int main(int argc, char *argv[]) {
     cmdline_parser(argc, argv, &args_info);
+
+    // SIGPIPE sinyalini yok say, böylece yazma hataları EPIPE olarak döner
+    signal(SIGPIPE, SIG_IGN);
+
+    // Mutex'leri initialize et
+    if (pthread_mutex_init(&lease_manager_mutex, NULL) != 0) {
+        perror("lease_manager_mutex init failed");
+        return EXIT_FAILURE;
+    }
+    if (pthread_mutex_init(&foothill_mutex, NULL) != 0) {
+        perror("foothill_mutex init failed");
+        pthread_mutex_destroy(&lease_manager_mutex); // Önceki mutex'i temizle
+        return EXIT_FAILURE;
+    }
 
     init();
     const struct shared_ptr ctx = init_ctx();
     if (args_info.login_given) {
         amUsername = strtok(args_info.login_arg, ":");
         amPassword = strtok(NULL, ":");
+        if (amUsername == NULL || amPassword == NULL) {
+            fprintf(stderr, "[!] Invalid login format. Use username:password\n");
+            return EXIT_FAILURE;
+        }
     }
     if (args_info.login_given && !login(ctx)) {
         fprintf(stderr, "[!] login failed\n");
@@ -607,9 +716,21 @@ int main(int argc, char *argv[]) {
     _ZN22SVPlaybackLeaseManager12requestLeaseERKb(leaseMgr, &autom);
     FHinstance = _ZN21SVFootHillSessionCtrl8instanceEv();
 
-    pthread_t m3u8_thread;
-    pthread_create(&m3u8_thread, NULL, &new_socket_m3u8, NULL);
-    pthread_detach(m3u8_thread);
+    pthread_t m3u8_thread_id; // thread ID'si için değişken
+    if (pthread_create(&m3u8_thread_id, NULL, new_socket_m3u8, NULL) != 0) {
+        perror("Failed to create m3u8 thread");
+        // M3U8 thread'i olmadan devam edilebilir mi, yoksa çıkış mı yapılmalı?
+        // Şimdilik sadece hata basıp devam ediyoruz.
+    } else {
+        pthread_detach(m3u8_thread_id); // Ana thread'in beklemesine gerek yok
+    }
     
-    return new_socket();
+    int result = new_socket(); // Ana thread şifre çözme soketini dinler
+
+    // Program sonlanırken mutex'leri yok et (normalde new_socket sonsuz döngüde olduğu için buraya ulaşılmaz)
+    pthread_mutex_destroy(&lease_manager_mutex);
+    pthread_mutex_destroy(&foothill_mutex);
+
+    return result;
 }
+
