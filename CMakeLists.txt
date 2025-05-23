@@ -6,9 +6,6 @@ include(ExternalProject)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 
-# Find Threads (pthread)
-find_package(Threads REQUIRED)
-
 set(ANDROID_NDK_PATH "$ENV{HOME}/android-ndk-r23b")
 set(TOOLCHAIN "${ANDROID_NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64")
 
@@ -16,8 +13,9 @@ set(CMAKE_C_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang")
 set(CMAKE_CXX_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang++")
 set(C_COMPILER "${TOOLCHAIN}/bin/clang")
 
-set(CMAKE_C_FLAGS "-Wall -Werror -O3")
-set(CMAKE_CXX_FLAGS "-Wall -Werror -O3")
+set(CMAKE_C_FLAGS "-Wall -Werror -O3 -pthread")
+set(CMAKE_CXX_FLAGS "-Wall -Werror -O3 -pthread")
+set(CMAKE_EXE_LINKER_FLAGS "-pthread")
 
 set(CMDLINE_SOURCE cmdline.c)
 set(HANDLE_SOURCE main.cpp)
@@ -45,7 +43,6 @@ target_link_libraries(main
     ${ANDROIDAPPMUSIC_LIB}
     ${STORESERVICESCORE_LIB}
     ${MEDIAPLATFORM_LIB}
-    Threads::Threads
 )
 
 link_directories(${CMAKE_SOURCE_DIR}/rootfs/system/lib64)
