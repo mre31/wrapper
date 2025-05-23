@@ -13,9 +13,9 @@ set(CMAKE_C_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang")
 set(CMAKE_CXX_COMPILER "${TOOLCHAIN}/bin/x86_64-linux-android22-clang++")
 set(C_COMPILER "${TOOLCHAIN}/bin/clang")
 
-set(CMAKE_C_FLAGS "-Wall -Werror -O3 -pthread")
-set(CMAKE_CXX_FLAGS "-Wall -Werror -O3 -pthread")
-set(CMAKE_EXE_LINKER_FLAGS "-pthread")
+set(CMAKE_C_FLAGS "-Wall -Werror -O3 -pthread -flto")
+set(CMAKE_CXX_FLAGS "-Wall -Werror -O3 -pthread -flto")
+set(CMAKE_EXE_LINKER_FLAGS "-pthread -flto")
 
 set(CMDLINE_SOURCE cmdline.c)
 set(HANDLE_SOURCE main.cpp)
