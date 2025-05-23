@@ -42,6 +42,7 @@ target_link_libraries(main
     ${ANDROIDAPPMUSIC_LIB}
     ${STORESERVICESCORE_LIB}
     ${MEDIAPLATFORM_LIB}
+    pthread
 )
 
 link_directories(${CMAKE_SOURCE_DIR}/rootfs/system/lib64)
