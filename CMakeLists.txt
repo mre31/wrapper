@@ -6,6 +6,9 @@ include(ExternalProject)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 11)
 
+# Find Threads (pthread)
+find_package(Threads REQUIRED)
+
 set(ANDROID_NDK_PATH "$ENV{HOME}/android-ndk-r23b")
 set(TOOLCHAIN "${ANDROID_NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64")
 
@@ -42,7 +45,7 @@ target_link_libraries(main
     ${ANDROIDAPPMUSIC_LIB}
     ${STORESERVICESCORE_LIB}
     ${MEDIAPLATFORM_LIB}
-    pthread
+    Threads::Threads
 )
 
 link_directories(${CMAKE_SOURCE_DIR}/rootfs/system/lib64)
